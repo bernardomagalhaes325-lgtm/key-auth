@@ -1,150 +1,171 @@
 const express = require('express');
-const path = require('path');
-const fs = require('fs');
+const path    = require('path');
+const fs      = require('fs');
 
-const app = express();
+const app  = express();
 const PORT = process.env.PORT || 3000;
-const DB_FILE = path.join(__dirname, 'data.json');
 
+// ── Storage ──────────────────────────────────────────────────────────────────
+// Em produção (Render) os ficheiros são efémeros, mas para este use-case
+// (poucos clientes, volume pequeno) um ficheiro JSON local é suficiente.
+// Para persistência real substitui por uma DB (SQLite, Postgres, etc.)
+const DATA_FILE = path.join(__dirname, 'keys.json');
+
+function readKeys() {
+  try {
+    if (!fs.existsSync(DATA_FILE)) return [];
+    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+  } catch { return []; }
+}
+
+function writeKeys(keys) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(keys, null, 2), 'utf8');
+}
+
+// ── Middleware ────────────────────────────────────────────────────────────────
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
-/* ---------- Persistência simples em arquivo JSON ---------- */
-function readDB() {
-  try {
-    if (!fs.existsSync(DB_FILE)) return [];
-    return JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
-  } catch (e) {
-    return [];
-  }
-}
-function writeDB(keys) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(keys, null, 2));
-}
-
+// ── Categorias ────────────────────────────────────────────────────────────────
 const CATS = {
-  diaria:     { days: 1 },
-  semanal:    { days: 7 },
-  mensal:     { days: 30 },
-  trimestral: { days: 90 },
-  anual:      { days: 365 },
-  permanente: { days: null },
+  diaria:      1,
+  semanal:     7,
+  mensal:      30,
+  trimestral:  90,
+  anual:       365,
+  permanente:  null,
 };
 
-function uid(n) {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let s = '';
-  for (let i = 0; i < n; i++) s += chars[Math.floor(Math.random() * chars.length)];
-  return s;
-}
-function genCode(catId) {
-  const prefix = catId.slice(0, 3).toUpperCase();
-  return `${prefix}-${uid(4)}-${uid(4)}-${uid(4)}`;
-}
+// ── API REST ──────────────────────────────────────────────────────────────────
 
-/* ---------- Auth simples do painel (header x-admin-key) ---------- */
-const ADMIN_KEY = process.env.ADMIN_KEY || 'Shark10-10';
-function requireAdmin(req, res, next) {
-  if (req.headers['x-admin-key'] !== ADMIN_KEY) {
-    return res.status(401).json({ success: false, error: 'unauthorized' });
-  }
-  next();
-}
-
-/* ---------- Endpoints do painel (admin) ---------- */
-app.get('/api/keys', requireAdmin, (req, res) => {
-  res.json({ success: true, keys: readDB() });
+// GET /api/keys  — retorna todas as keys (painel web)
+app.get('/api/keys', (req, res) => {
+  res.json(readKeys());
 });
 
-app.post('/api/keys/generate', requireAdmin, (req, res) => {
-  const { category, qty, note } = req.body;
-  if (!CATS[category]) return res.status(400).json({ success: false, error: 'invalid_category' });
-  const n = Math.min(50, Math.max(1, parseInt(qty) || 1));
-  const keys = readDB();
-  const created = [];
-  for (let i = 0; i < n; i++) {
+// POST /api/keys  — gera novas keys  { category, qty, note }
+app.post('/api/keys', (req, res) => {
+  const { category, qty = 1, note = '' } = req.body;
+  if (!CATS.hasOwnProperty(category))
+    return res.status(400).json({ error: 'invalid_category' });
+
+  const keys  = readKeys();
+  const added = [];
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const uid   = n => Array.from({length:n}, ()=>chars[Math.floor(Math.random()*chars.length)]).join('');
+  const genCode = cat => `${cat.slice(0,3).toUpperCase()}-${uid(4)}-${uid(4)}-${uid(4)}`;
+
+  const count = Math.min(50, Math.max(1, parseInt(qty) || 1));
+  for (let i = 0; i < count; i++) {
     const k = {
-      code: genCode(category),
+      code:        genCode(category),
       category,
-      note: note || '',
-      createdAt: Date.now(),
-      status: 'pending',
-      hwid: null,
+      note,
+      createdAt:   Date.now(),
+      status:      'pending',
+      hwid:        null,
       activatedAt: null,
-      expiresAt: null,
+      expiresAt:   null,
     };
     keys.push(k);
-    created.push(k);
+    added.push(k);
   }
-  writeDB(keys);
-  res.json({ success: true, created });
+  writeKeys(keys);
+  res.json({ added });
 });
 
-app.delete('/api/keys/:code', requireAdmin, (req, res) => {
-  let keys = readDB();
+// DELETE /api/keys/:code  — apaga uma key
+app.delete('/api/keys/:code', (req, res) => {
+  let keys = readKeys();
+  const before = keys.length;
   keys = keys.filter(k => k.code !== req.params.code);
-  writeDB(keys);
-  res.json({ success: true });
+  writeKeys(keys);
+  res.json({ deleted: before - keys.length });
 });
 
-app.post('/api/keys/:code/reset-hwid', requireAdmin, (req, res) => {
-  const keys = readDB();
+// POST /api/keys/:code/reset-hwid  — limpa o HWID
+app.post('/api/keys/:code/reset-hwid', (req, res) => {
+  const keys = readKeys();
   const k = keys.find(x => x.code === req.params.code);
-  if (!k) return res.status(404).json({ success: false, error: 'key_not_found' });
+  if (!k) return res.status(404).json({ error: 'not_found' });
   k.hwid = null;
-  writeDB(keys);
-  res.json({ success: true, key: k });
+  writeKeys(keys);
+  res.json({ ok: true });
 });
 
-/* ---------- Endpoint público: o programa do cliente chama este ---------- */
-/* POST /api/validate   body: { "key": "DIA-XXXX-XXXX-XXXX", "hwid": "PC-12345" } */
+// ── Endpoint principal — usado pelo Launcher C++ ──────────────────────────────
+//
+// POST /api/validate
+// Body: { "key": "XXX-XXXX-XXXX-XXXX", "hwid": "ABCD1234-AABBCCDD..." }
+//
+// Resposta sucesso:
+// { "success": true, "username": "User", "role": "...", "type": "mensal",
+//   "expires_at": 1700000000 }
+//
+// Resposta erro:
+// { "success": false, "message": "..." }
+// ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/validate', (req, res) => {
   const { key, hwid } = req.body || {};
-  if (!key || !hwid) {
-    return res.status(400).json({ success: false, error: 'missing_key_or_hwid' });
-  }
-  const keys = readDB();
-  const k = keys.find(x => x.code === key.trim().toUpperCase());
 
-  if (!k) {
-    return res.status(404).json({ success: false, error: 'key_not_found' });
-  }
+  if (!key)  return res.json({ success: false, message: 'Key não informada.' });
+  if (!hwid) return res.json({ success: false, message: 'HWID não informado.' });
 
-  // Key ainda não foi usada -> ativa agora e vincula o HWID
-  if (k.status === 'pending') {
-    const cat = CATS[k.category];
-    k.status = 'active';
-    k.hwid = hwid;
-    k.activatedAt = Date.now();
-    k.expiresAt = cat.days ? Date.now() + cat.days * 86400000 : null;
-    writeDB(keys);
+  const keys = readKeys();
+  const k    = keys.find(x => x.code === key.trim().toUpperCase());
+
+  if (!k)
+    return res.json({ success: false, message: 'Key inválida ou não encontrada.' });
+
+  const now = Date.now();
+
+  // ── Caso 1: key já ativa ──────────────────────────────────────────────────
+  if (k.status === 'active') {
+    // Verifica se expirou
+    if (k.expiresAt && now > k.expiresAt)
+      return res.json({ success: false, message: 'Key expirada.' });
+
+    // Verifica HWID — se já tem um HWID vinculado, deve bater
+    if (k.hwid && k.hwid !== hwid)
+      return res.json({ success: false, message: 'HWID inválido para esta key.' });
+
+    // Se ainda não tem HWID (reset), vincula agora
+    if (!k.hwid) {
+      k.hwid = hwid;
+      writeKeys(keys);
+    }
+
     return res.json({
-      success: true,
-      message: 'key_activated',
-      type: k.category,
-      expiresAt: k.expiresAt,
+      success:    true,
+      username:   k.note || 'User',
+      role:       k.category,
+      type:       k.category,
+      expires_at: k.expiresAt ? Math.floor(k.expiresAt / 1000) : 0,
     });
   }
 
-  // Key já ativa -> precisa bater o HWID
-  if (k.hwid && k.hwid !== hwid) {
-    return res.status(403).json({ success: false, error: 'hwid_mismatch' });
+  // ── Caso 2: key pendente — primeira activação ─────────────────────────────
+  if (k.status === 'pending') {
+    const days = CATS[k.category];
+    k.status      = 'active';
+    k.hwid        = hwid;
+    k.activatedAt = now;
+    k.expiresAt   = days ? now + days * 86400000 : null;
+    writeKeys(keys);
+
+    return res.json({
+      success:    true,
+      username:   k.note || 'User',
+      role:       k.category,
+      type:       k.category,
+      expires_at: k.expiresAt ? Math.floor(k.expiresAt / 1000) : 0,
+    });
   }
 
-  // Key expirada
-  if (k.expiresAt && Date.now() > k.expiresAt) {
-    return res.status(403).json({ success: false, error: 'key_expired' });
-  }
-
-  return res.json({
-    success: true,
-    message: 'key_valid',
-    type: k.category,
-    expiresAt: k.expiresAt,
-  });
+  return res.json({ success: false, message: 'Status de key inválido.' });
 });
 
-/* ---------- Fallback: serve o painel ---------- */
+// ── Fallback SPA ──────────────────────────────────────────────────────────────
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
