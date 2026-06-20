@@ -316,6 +316,7 @@ footer{margin-top:36px;text-align:center;color:var(--text-faint);font-size:11px;
 /* ---------- Login ---------- */
 const VALID_USER = 'Shark10';
 const VALID_PASS = '10';
+const ADMIN_KEY = 'Shark10-10'; // precisa bater com ADMIN_KEY do server.js
 
 function attemptLogin(){
   const user = document.getElementById('loginUser').value.trim();
@@ -334,6 +335,10 @@ document.getElementById('loginBtn').addEventListener('click', attemptLogin);
 document.getElementById('loginPass').addEventListener('keydown', e=>{ if(e.key==='Enter') attemptLogin(); });
 document.getElementById('loginUser').addEventListener('keydown', e=>{ if(e.key==='Enter') attemptLogin(); });
 
+function apiHeaders(){
+  return { 'Content-Type':'application/json', 'x-admin-key': ADMIN_KEY };
+}
+
 const CATS = [
   {id:'diaria',     label:'Diária',     dot:'#ff2d3d', days:1},
   {id:'semanal',    label:'Semanal',    dot:'#ff5c4d', days:7},
@@ -344,29 +349,6 @@ const CATS = [
 ];
 
 let keys = []; // {code, category, note, createdAt, status:'pending'|'active', hwid, activatedAt, expiresAt}
-const STORAGE_KEY = 'vaultkey-data';
-
-/**
- * activateKeyByCode(code, hwid)
- * Chame esta função a partir do seu servidor (Render) quando o cliente
- * inserir a key no programa/launcher. Ela move a key da categoria
- * pendente direto para "Keys Ativas", calculando a expiração sozinha.
- * Retorna { ok:true } ou { ok:false, error:'...' }.
- */
-async function activateKeyByCode(code, hwid){
-  const k = keys.find(x=>x.code===code);
-  if(!k) return {ok:false, error:'key_not_found'};
-  if(k.status==='active') return {ok:false, error:'already_active'};
-  const cat = catInfo(k.category);
-  k.status='active';
-  k.hwid=hwid || null;
-  k.activatedAt=Date.now();
-  k.expiresAt = cat.days ? Date.now() + cat.days*86400000 : null;
-  await save();
-  render();
-  showToast('Key ativada automaticamente: '+code);
-  return {ok:true, key:k};
-}
 
 function uid(n){
   const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -385,16 +367,13 @@ function fmtDate(ts){
 }
 function catInfo(id){ return CATS.find(c=>c.id===id); }
 
-async function save(){
-  try{
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(keys));
-  }catch(e){ console.error('Erro ao salvar', e); }
-}
 async function load(){
   try{
-    const raw = localStorage.getItem(STORAGE_KEY);
-    keys = raw ? JSON.parse(raw) : [];
+    const r = await fetch('/api/keys', { headers: apiHeaders() });
+    const data = await r.json();
+    keys = data.success ? data.keys : [];
   }catch(e){
+    console.error('Erro ao carregar', e);
     keys = [];
   }
   render();
@@ -501,39 +480,35 @@ document.getElementById('genBtn').addEventListener('click', async ()=>{
   const cat = document.getElementById('genCategory').value;
   const qty = Math.min(50, Math.max(1, parseInt(document.getElementById('genQty').value)||1));
   const note = document.getElementById('genNote').value.trim();
-  for(let i=0;i<qty;i++){
-    keys.push({
-      code: genCode(cat),
-      category: cat,
-      note,
-      createdAt: Date.now(),
-      status:'pending',
-      hwid:null,
-      activatedAt:null,
-      expiresAt:null
+  try{
+    const r = await fetch('/api/keys/generate', {
+      method:'POST', headers: apiHeaders(),
+      body: JSON.stringify({category:cat, qty, note})
     });
-  }
-  document.getElementById('genNote').value='';
-  await save();
-  render();
-  showToast(`${qty} key(s) gerada(s) — ${catInfo(cat).label}`);
+    const data = await r.json();
+    if(!data.success){ showToast('Erro ao gerar key'); return; }
+    document.getElementById('genNote').value='';
+    await load();
+    showToast(`${qty} key(s) gerada(s) — ${catInfo(cat).label}`);
+  }catch(e){ showToast('Erro de conexão com o servidor'); }
 });
 
 async function deleteKey(code){
-  keys = keys.filter(k=>k.code!==code);
-  await save();
-  render();
-  showToast('Key removida');
+  try{
+    await fetch('/api/keys/'+encodeURIComponent(code), { method:'DELETE', headers: apiHeaders() });
+    await load();
+    showToast('Key removida');
+  }catch(e){ showToast('Erro de conexão com o servidor'); }
 }
 
 async function resetHwid(code){
-  const k = keys.find(x=>x.code===code);
-  if(k){
-    k.hwid=null;
-    await save();
-    render();
+  try{
+    const r = await fetch('/api/keys/'+encodeURIComponent(code)+'/reset-hwid', { method:'POST', headers: apiHeaders() });
+    const data = await r.json();
+    if(!data.success){ showToast('Erro ao resetar HWID'); return; }
+    await load();
     showToast('HWID resetado para '+code);
-  }
+  }catch(e){ showToast('Erro de conexão com o servidor'); }
 }
 
 document.getElementById('resetHwidBtn').addEventListener('click', async ()=>{
@@ -542,11 +517,8 @@ document.getElementById('resetHwidBtn').addEventListener('click', async ()=>{
   const k = keys.find(x=>x.code===code);
   if(!k){ showToast('Key não encontrada'); return; }
   if(k.status!=='active'){ showToast('Essa key ainda não está ativa'); return; }
-  k.hwid=null;
+  await resetHwid(code);
   document.getElementById('resetKeyInput').value='';
-  await save();
-  render();
-  showToast('HWID resetado com sucesso');
 });
 
 /* ---------- Tabs ---------- */
